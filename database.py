@@ -36,6 +36,19 @@ class Database:
                 )
             """)
 
+            # Создаем таблицу users если она не существует
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY,
+                    first_name TEXT,
+                    last_name TEXT,
+                    username TEXT,
+                    phone TEXT,
+                    registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
             # Проверяем наличие полей client_name, client_phone, client_nickname в таблице chats
             cursor.execute("PRAGMA table_info(chats)")
             columns = {column[1] for column in cursor.fetchall()}
@@ -1106,7 +1119,82 @@ class Database:
             logger.error(f"Error updating manager activity: {e}")
             conn.rollback()
             return False
-    
+            
+    def save_user_data(self, user_id: int, first_name: str = None, 
+                      last_name: str = None, username: str = None, 
+                      phone: str = None) -> bool:
+        """Сохраняет или обновляет данные пользователя
+        
+        Args:
+            user_id: ID пользователя в Telegram
+            first_name: Имя пользователя
+            last_name: Фамилия пользователя
+            username: Имя пользователя в Telegram
+            phone: Номер телефона
+            
+        Returns:
+            bool: Успешность операции
+        """
+        conn, cursor = self._get_connection()
+        try:
+            # Проверяем существует ли пользователь
+            cursor.execute(
+                "SELECT user_id FROM users WHERE user_id = ?", 
+                (user_id,)
+            )
+            exists = cursor.fetchone() is not None
+            
+            if exists:
+                # Обновляем данные существующего пользователя
+                fields_to_update = []
+                values = []
+                
+                if first_name is not None:
+                    fields_to_update.append("first_name = ?")
+                    values.append(first_name)
+                    
+                if last_name is not None:
+                    fields_to_update.append("last_name = ?")
+                    values.append(last_name)
+                    
+                if username is not None:
+                    fields_to_update.append("username = ?")
+                    values.append(username)
+                    
+                if phone is not None:
+                    fields_to_update.append("phone = ?")
+                    values.append(phone)
+                
+                # Всегда обновляем время последней активности
+                fields_to_update.append("last_activity = CURRENT_TIMESTAMP")
+                
+                if fields_to_update:
+                    query = f"""
+                        UPDATE users 
+                        SET {', '.join(fields_to_update)}
+                        WHERE user_id = ?
+                    """
+                    values.append(user_id)
+                    cursor.execute(query, values)
+            else:
+                # Добавляем нового пользователя
+                cursor.execute(
+                    """
+                    INSERT INTO users 
+                    (user_id, first_name, last_name, username, phone)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (user_id, first_name, last_name, username, phone)
+                )
+            
+            conn.commit()
+            logger.info(f"User data saved for user_id {user_id}")
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Error saving user data: {e}")
+            conn.rollback()
+            return False
+
     def get_available_manager(self) -> int:
         """Получает ID доступного менеджера с наименьшим количеством активных чатов
         

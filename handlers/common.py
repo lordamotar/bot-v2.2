@@ -192,6 +192,8 @@ async def handle_message(message: types.Message, bot: Bot, db: Database, config=
             
             try:
                 # Сохраняем сообщение в историю
+                # chat_id должен быть client_id (ID чата = ID клиента)
+                # sender_id должен быть user_id (ID менеджера)
                 saved = db.save_message(client_id, user_id, content, message_type, file_id)
                 if saved:
                     logger.info(f"Manager message saved: chat_id={client_id}, sender_id={user_id}")
@@ -227,7 +229,9 @@ async def handle_message(message: types.Message, bot: Bot, db: Database, config=
             manager_id = active_chat[1]
             
             try:
-                # Сохраняем сообщение в историю с правильным ID отправителя
+                # Сохраняем сообщение в историю
+                # chat_id должен быть user_id (ID клиента)
+                # sender_id должен быть user_id (ID клиента)
                 saved = db.save_message(user_id, user_id, content, message_type, file_id)
                 if saved:
                     logger.info(f"Client message saved: chat_id={user_id}, sender_id={user_id}")

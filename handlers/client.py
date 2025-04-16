@@ -102,80 +102,116 @@ async def handle_support_request(message: types.Message, bot: Bot, db: Database,
         )
         return
 
-    # Проверяем, есть ли у пользователя контактные данные в базе
-    client_info = db.get_client_contact_info(user_id)
-    
-    if client_info and client_info[0] and client_info[1]:  # Если есть имя и телефон
-        # Создаем чат без запроса контактных данных
-        if not db.create_chat(user_id, username):
-            logger.error(f"Не удалось создать чат для пользователя {user_id}")
-            await message.answer(
-                "Произошла ошибка при создании чата. Пожалуйста, попробуйте позже.",
-                reply_markup=get_main_keyboard()
-            )
-            return
-        
-        # Информируем пользователя
+    # Проверяем данные пользователя в таблице users
+    try:
+        # Запрос к базе данных для проверки наличия телефона
+        conn, cursor = db._get_connection()
+        cursor.execute(
+            "SELECT first_name, last_name, phone FROM users WHERE user_id = ?",
+            (user_id,)
+        )
+        user_data = cursor.fetchone()
+    except Exception as e:
+        logger.error(f"Ошибка при получении данных пользователя: {e}")
+        user_data = None
+    finally:
+        if 'conn' in locals():
+            conn.close()
+            delattr(db._local, 'connection')
+
+    # Если у пользователя нет телефона или полного имени, запрашиваем контакт
+    if not user_data or not user_data[2]:  # Проверяем наличие телефона
         await message.answer(
-            "Ваш запрос отправлен менеджерам. Пожалуйста, ожидайте ответа.",
-            reply_markup=get_chat_keyboard()
+            "Для связи с менеджером необходимо поделиться контактными данными.",
+            reply_markup=get_share_contact_keyboard()
         )
-        
-        # Получаем доступного менеджера с наименьшей нагрузкой
-        manager_id = db.get_available_manager()
-        
-        # Получаем данные клиента
-        client_name = client_info[0]
-        client_phone = client_info[1]
-        
-        # Формируем сообщение с данными клиента
-        client_info_text = (
-            f"Новый запрос в чат от пользователя {username}\n"
-            f"Имя: {client_name}\n"
-            f"Телефон: {client_phone}"
+        return
+    
+    # Если у пользователя уже есть контактные данные, продолжаем процесс
+    # Создаем чат для пользователя
+    if not db.create_chat(user_id, username):
+        logger.error(f"Не удалось создать чат для пользователя {user_id}")
+        await message.answer(
+            "Произошла ошибка при создании чата. Пожалуйста, попробуйте позже.",
+            reply_markup=get_main_keyboard()
         )
-        
-        # Создаем клавиатуру для менеджера с информацией о клиенте
-        manager_keyboard = get_manager_keyboard(username, client_name, client_phone)
-        
-        # Отправляем уведомление менеджеру(ам)
-        if manager_id > 0:
-            # Уведомляем конкретного менеджера
+        return
+    
+    # Извлекаем имя и телефон пользователя
+    first_name = user_data[0] or ""
+    last_name = user_data[1] or ""
+    phone = user_data[2] or ""
+    
+    # Формируем полное имя
+    full_name = first_name
+    if last_name:
+        full_name += f" {last_name}"
+    
+    # Информируем пользователя
+    await message.answer(
+        "Ваш запрос отправлен менеджерам. Пожалуйста, ожидайте ответа.",
+        reply_markup=get_chat_keyboard()
+    )
+    
+    # Сохраняем данные в таблицу chats для совместимости
+    db.save_client_contact_info(user_id, full_name, phone, username)
+    
+    # Получаем доступного менеджера с наименьшей нагрузкой
+    manager_id = db.get_available_manager()
+    
+    # Формируем сообщение с данными клиента
+    client_info = (
+        f"Новый запрос в чат от пользователя {username}\n"
+        f"Имя: {full_name}\n"
+        f"Телефон: {phone}"
+    )
+    
+    # Создаем клавиатуру для менеджера с информацией о клиенте
+    manager_keyboard = get_manager_keyboard(username, full_name, phone)
+    
+    # Отправляем уведомление менеджеру(ам)
+    if manager_id > 0:
+        # Уведомляем конкретного менеджера
+        try:
             await bot.send_message(
                 manager_id,
-                client_info_text,
+                client_info,
                 reply_markup=manager_keyboard
             )
             logger.info(f"Запрос на чат отправлен менеджеру {manager_id}")
-        else:
-            # Уведомляем всех менеджеров
-            notification_sent = False
+        except Exception as e:
+            logger.error(f"Ошибка отправки уведомления менеджеру {manager_id}: {e}")
+            # Если не удалось отправить конкретному менеджеру, отправляем всем
             for mgr_id in config.config.managers:
                 try:
                     await bot.send_message(
                         mgr_id,
-                        client_info_text,
+                        client_info,
                         reply_markup=manager_keyboard
                     )
-                    notification_sent = True
-                except Exception as e:
-                    logger.error(f"Ошибка отправки уведомления менеджеру {mgr_id}: {e}")
-            
-            if notification_sent:
-                logger.info("Запрос на чат отправлен всем менеджерам")
-            else:
-                logger.error("Не удалось уведомить ни одного менеджера")
-                await message.answer(
-                    "Произошла ошибка при отправке запроса менеджерам. "
-                    "Пожалуйста, попробуйте позже.",
-                    reply_markup=get_main_keyboard()
-                )
+                except Exception:
+                    pass
     else:
-        # Просим пользователя поделиться контактом
-        await message.answer(
-            "Перед тем, как связаться с менеджером, поделитесь вашими контактными данными.",
-            reply_markup=get_share_contact_keyboard()
-        )
+        # Уведомляем всех менеджеров
+        notification_sent = False
+        for mgr_id in config.config.managers:
+            try:
+                await bot.send_message(
+                    mgr_id,
+                    client_info,
+                    reply_markup=manager_keyboard
+                )
+                notification_sent = True
+            except Exception as e:
+                logger.error(f"Ошибка отправки уведомления менеджеру {mgr_id}: {e}")
+        
+        if not notification_sent:
+            logger.error("Не удалось уведомить ни одного менеджера")
+            await message.answer(
+                "Произошла ошибка при отправке запроса менеджерам. "
+                "Пожалуйста, попробуйте позже.",
+                reply_markup=get_main_keyboard()
+            )
 
 
 async def handle_share_contact(message: types.Message, bot: Bot, db: Database, config):
@@ -206,63 +242,32 @@ async def process_contact_data(message: types.Message, bot: Bot, db: Database, c
     
     # Извлекаем данные из контакта
     phone = message.contact.phone_number
-    name = message.contact.first_name
-    if message.contact.last_name:
-        name += f" {message.contact.last_name}"
+    first_name = message.contact.first_name
+    last_name = message.contact.last_name
     
-    logger.info(f"Получен контакт от пользователя {user_id}: имя={name}, телефон={phone}")
+    # Составляем полное имя для отображения
+    full_name = first_name
+    if last_name:
+        full_name += f" {last_name}"
     
-    # Перезагружаем базу данных перед дальнейшими операциями
-    # для применения возможных изменений структуры таблиц
+    logger.info(f"Получен контакт от пользователя {user_id}: имя={full_name}, телефон={phone}")
+    
+    # Сохраняем данные в таблицу users
+    saved_user = db.save_user_data(
+        user_id=user_id,
+        first_name=first_name,
+        last_name=last_name,
+        username=username,
+        phone=phone
+    )
+    
+    if not saved_user:
+        logger.error(f"Не удалось сохранить данные пользователя {user_id} в таблицу users")
+    
+    # Также сохраняем данные клиента в таблицу chats для совместимости
     try:
-        if "_create_tables" in dir(db):
-            db._create_tables()
-            logger.info("Структура базы данных обновлена")
-    except Exception as e:
-        logger.error(f"Ошибка при обновлении структуры базы данных: {e}")
-    
-    # Проверяем существование таблицы и полей для отладки
-    try:
-        conn, cursor = db._get_connection()
-        cursor.execute("PRAGMA table_info(chats)")
-        columns = cursor.fetchall()
-        column_names = [col[1] for col in columns]
-        logger.info(f"Структура таблицы chats: {column_names}")
-        
-        # Проверяем запись для текущего пользователя
-        cursor.execute("SELECT * FROM chats WHERE client_id = ?", (user_id,))
-        user_record = cursor.fetchone()
-        if user_record:
-            logger.info(f"Найдена запись для пользователя: {user_record}")
-        else:
-            logger.info(f"Запись для пользователя {user_id} не найдена")
-    except Exception as e:
-        logger.error(f"Ошибка при проверке структуры базы данных: {e}")
-    finally:
-        if 'conn' in locals():
-            conn.close()
-            delattr(db._local, 'connection')
-    
-    # Проверяем, существует ли запись в базе данных для этого пользователя
-    # и создаем ее, если она отсутствует
-    chat_info = db.get_client_contact_info(user_id)
-    if not chat_info:
-        logger.info(f"Не найдена существующая запись для пользователя {user_id}, создаем новую")
-        if not db.create_chat(user_id, username):
-            logger.error(f"Не удалось создать запись чата для пользователя {user_id}")
-            await message.answer(
-                "Произошла ошибка при создании чата. Пожалуйста, попробуйте позже.",
-                reply_markup=get_main_keyboard()
-            )
-            return
-        logger.info(f"Запись чата создана для пользователя {user_id}")
-    else:
-        logger.info(f"Найдена существующая запись для пользователя {user_id}: {chat_info}")
-    
-    # Сохраняем данные клиента
-    try:
-        logger.info(f"Попытка сохранить контактные данные: user_id={user_id}, name={name}, phone={phone}")
-        success = db.save_client_contact_info(user_id, name, phone, username)
+        logger.info(f"Сохранение контактных данных: user_id={user_id}, name={full_name}, phone={phone}")
+        success = db.save_client_contact_info(user_id, full_name, phone, username)
         if not success:
             logger.error(f"Не удалось сохранить контактные данные для пользователя {user_id}")
             await message.answer(
@@ -279,13 +284,6 @@ async def process_contact_data(message: types.Message, bot: Bot, db: Database, c
         )
         return
     
-    # Проверяем, сохранились ли данные
-    try:
-        updated_info = db.get_client_contact_info(user_id)
-        logger.info(f"Проверка после сохранения: {updated_info}")
-    except Exception as e:
-        logger.error(f"Ошибка при проверке сохраненных данных: {e}")
-    
     # Информируем пользователя
     logger.info(f"Контактные данные сохранены для пользователя {username} (ID: {user_id})")
     await message.answer(
@@ -300,12 +298,12 @@ async def process_contact_data(message: types.Message, bot: Bot, db: Database, c
     # Формируем сообщение с данными клиента
     client_info = (
         f"Новый запрос в чат от пользователя {username}\n"
-        f"Имя: {name}\n"
+        f"Имя: {full_name}\n"
         f"Телефон: {phone}"
     )
     
     # Создаем клавиатуру для менеджера с информацией о клиенте
-    manager_keyboard = get_manager_keyboard(username, name, phone)
+    manager_keyboard = get_manager_keyboard(username, full_name, phone)
     
     # Определяем вспомогательную функцию для отправки уведомлений всем менеджерам
     async def send_to_all_managers():
